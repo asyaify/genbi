@@ -311,7 +311,7 @@ class TestBuildExecutiveSummary:
         })
         summary = build_executive_summary(df)
         assert "%" in summary
-        assert "Топ" in summary
+        assert "Лидеры" in summary
 
     def test_empty_df(self):
         summary = build_executive_summary(pd.DataFrame())
@@ -332,6 +332,25 @@ class TestBuildExecutiveSummary:
         })
         summary = build_executive_summary(df)
         assert "концентрация" in summary.lower()
+
+    def test_no_emojis(self):
+        df = pd.DataFrame({"Cat": ["A", "B", "C"], "Val": [100, 200, 300]})
+        summary = build_executive_summary(df)
+        # Не должно быть эмодзи
+        import re
+        emoji_pattern = re.compile(
+            "[\U0001F300-\U0001F9FF\U00002600-\U000027BF\U0001FA00-\U0001FA6F]"
+        )
+        assert not emoji_pattern.search(summary), f"Emoji found in summary: {summary}"
+
+    def test_paragraphs_separated(self):
+        df = pd.DataFrame({
+            "Cat": [f"C{i}" for i in range(10)],
+            "Val": list(range(10, 0, -1)),
+        })
+        summary = build_executive_summary(df)
+        # Блоки разделены двойным переносом строки
+        assert "\n\n" in summary
 
 
 # ────────────────────────────────────────

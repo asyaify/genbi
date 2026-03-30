@@ -405,14 +405,14 @@ def build_executive_summary(df: pd.DataFrame) -> str:
     lines = []
 
     # 1. Обзор данных
-    lines.append(f"📊 Обзор: {len(df)} строк, {len(df.columns)} колонок.")
+    lines.append(f"**Обзор данных:** {len(df)} строк, {len(df.columns)} колонок.")
 
     # 2. Качество данных
     total_cells = len(df) * len(df.columns)
     missing = df.isna().sum().sum()
     if missing > 0 and total_cells > 0:
         pct = missing / total_cells * 100
-        lines.append(f"⚠️ Пропуски: {int(missing)} ({pct:.1f}% ячеек).")
+        lines.append(f"**Качество данных:** обнаружены пропуски — {int(missing)} ({pct:.1f}% ячеек).")
 
     # 3. Ключевые метрики (до 2 числовых столбцов)
     for col in num_cols[:2]:
@@ -421,15 +421,16 @@ def build_executive_summary(df: pd.DataFrame) -> str:
             continue
 
         short = col[:30]
+        metric_parts = []
 
         if _is_rate_metric(col):
-            lines.append(
-                f"📈 '{short}': медиана {_format_value_axis(series.median())}, "
+            metric_parts.append(
+                f"**Метрика «{short}»:** медиана {_format_value_axis(series.median())}, "
                 f"диапазон {_format_value_axis(series.min())} – {_format_value_axis(series.max())}."
             )
         else:
-            lines.append(
-                f"📈 '{short}': итого {_format_value_axis(series.sum())}, "
+            metric_parts.append(
+                f"**Метрика «{short}»:** итого {_format_value_axis(series.sum())}, "
                 f"среднее {_format_value_axis(series.mean())}, макс {_format_value_axis(series.max())}."
             )
 
@@ -440,7 +441,7 @@ def build_executive_summary(df: pd.DataFrame) -> str:
             if iqr > 0:
                 outliers = int(((series < q1 - 1.5 * iqr) | (series > q3 + 1.5 * iqr)).sum())
                 if outliers > 0:
-                    lines.append(f"   ⚡ Выбросы: {outliers} значений за пределами нормы (IQR).")
+                    metric_parts.append(f"Выбросы: {outliers} значений за пределами нормы (IQR).")
 
         # Тренд (сравнение первой и второй половины)
         if len(series) > 2:
@@ -450,7 +451,9 @@ def build_executive_summary(df: pd.DataFrame) -> str:
                 change_pct = (second_half - first_half) / first_half * 100
                 if abs(change_pct) > 5:
                     direction = "рост" if change_pct > 0 else "снижение"
-                    lines.append(f"   📉 Тренд: {direction} ~{abs(change_pct):.0f}% (1-я половина → 2-я).")
+                    metric_parts.append(f"Тренд: {direction} ~{abs(change_pct):.0f}% (1-я половина → 2-я).")
+
+        lines.append("  \n".join(metric_parts))
 
     # 4. Лидеры по категориям с долями
     if cat_cols and num_cols:
@@ -467,20 +470,20 @@ def build_executive_summary(df: pd.DataFrame) -> str:
         if not grouped.empty and grouped.sum() > 0:
             top3 = grouped.head(3)
             total = grouped.sum()
-            parts = []
+            leader_lines = []
             for k, v in top3.items():
                 pct = v / total * 100
-                parts.append(f"{k}: {_format_value_axis(v)} ({pct:.0f}%)")
-            lines.append(f"🏆 Топ по '{metric_name}': {', '.join(parts)}.")
+                leader_lines.append(f"- {k}: {_format_value_axis(v)} ({pct:.0f}%)")
+            lines.append(f"**Лидеры по «{metric_name}»:**  \n" + "  \n".join(leader_lines))
 
             # Концентрация
             top3_share = top3.sum() / total * 100
             if top3_share > 70:
-                lines.append(f"   ⚠️ Высокая концентрация: топ-3 = {top3_share:.0f}% от общего объёма.")
+                lines.append(f"**Внимание:** высокая концентрация — топ-3 = {top3_share:.0f}% от общего объёма.")
 
     # 5. Рекомендация
-    lines.append("💡 Рекомендация: проверьте выбросы и динамику лидеров перед принятием решений.")
-    return "\n".join(lines)
+    lines.append("**Рекомендация:** проверьте выбросы и динамику лидеров перед принятием решений.")
+    return "\n\n".join(lines)
 
 
 def build_chart(df: pd.DataFrame, chart_type: str, x_col: str = None,
@@ -796,7 +799,7 @@ def render_assistant_message(msg: dict, idx: int) -> None:
         _render_static_chart(df, chart_type, suffix)
 
         with st.expander("Executive Summary"):
-            st.info(executive_summary)
+            st.markdown(executive_summary)
 
         with st.expander(f"📋 Таблица данных ({len(df)} строк)"):
             st.dataframe(df, use_container_width=True)
@@ -840,7 +843,7 @@ def _render_current_message(msg: dict, idx: int) -> None:
         render_interactive_analysis(df, chart_type, suffix, query)
 
         with st.expander("Executive Summary"):
-            st.info(executive_summary)
+            st.markdown(executive_summary)
 
         render_export_buttons(df, query, suffix, executive_summary)
 
