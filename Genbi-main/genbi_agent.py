@@ -32,14 +32,17 @@ qdrant = QdrantClient(url="http://localhost:6333")
 class OrcehestratorOutput(BaseModel):
     thought: str = Field(..., description="Размышления")
     dax: str = Field(..., description="Сгенерированный DAX запрос")
-    chart_type: Literal["bar", "line", "table"] = Field(..., description="Вид ответа")
+    chart_type: Literal["bar", "line", "pie", "treemap", "scatter", "area", "table"] = Field(..., description="Вид ответа")
 
 
 class GenBIOrchestrator:
     def __init__(self):
         self.full_schema = {}  # table_name -> list of columns
         self.all_measure_names =[] # Для авто-корректора
+        self.data_year_min = None
+        self.data_year_max = None
         self.load_local_schema()
+        self._detect_data_years()
 
     def load_local_schema(self):
         """Загружает полный .bim файл в память для сборки контекста (Schema Linking)"""
@@ -69,6 +72,22 @@ class GenBIOrchestrator:
             return[]
         res = client.embeddings.create(model=EMBEDDING_MODEL, input=text)
         return res.data[0].embedding
+
+    def _detect_data_years(self):
+        """Определяет актуальный диапазон лет данных в кубе."""
+        try:
+            df = execute_dax(
+                "EVALUATE SUMMARIZECOLUMNS('000 Календарь'[Год], "
+                '"val", [Реализация руб.])'
+            )
+            if hasattr(df, 'shape') and not df.empty:
+                years = sorted(df['Год'].dropna().astype(int).tolist())
+                if years:
+                    self.data_year_min = years[0]
+                    self.data_year_max = years[-1]
+                    logging.info(f"Диапазон данных: {self.data_year_min}–{self.data_year_max}")
+        except Exception as e:
+            logging.warning(f"Не удалось определить годы: {e}")
 
     def check_qdrant_collections(self) -> tuple[bool, list[str]]:
         """Проверяет наличие обязательных коллекций для RAG-поиска."""
@@ -149,11 +168,22 @@ class GenBIOrchestrator:
         now = datetime.now()
         current_date_context = now.strftime("%Y-%m-%d (день недели: %A, месяц: %B)")
 
+        # Актуальный диапазон данных
+        latest_year = self.data_year_max or 2022
+        year_range_note = ""
+        if self.data_year_min and self.data_year_max:
+            year_range_note = (
+                f"\nВАЖНО: Данные в кубе доступны за {self.data_year_min}–{self.data_year_max} годы. "
+                f"Последний год с данными: {self.data_year_max}. "
+                f'Если пользователь пишет "текущий год", "этот год", "за 2024" и т.п. — '
+                f"используй последний доступный год ({self.data_year_max}).\n"
+            )
+
         return f"""Ты — Senior BI-Аналитик (SSAS Tabular, DAX).
 Твоя задача — сгенерировать валидный DAX запрос на основе контекста.
 
-Сегодняшняя дата: {current_date_context}. 
-Используй эту дату как current_date_context  отсчета для "сегодня", "вчера", "прошлый месяц", "текущий год".
+Сегодняшняя дата: {current_date_context}.
+{year_range_note}
 
 ### КОНТЕКСТ ДАННЫХ (ТОЛЬКО ЭТИ ОБЪЕКТЫ СУЩЕСТВУЮТ):
 {context_str}
@@ -168,10 +198,11 @@ class GenBIOrchestrator:
    Правильно: [Название меры]
    ОШИБКА: ['Название меры']
 7. При фильтрации внутри SUMMARIZECOLUMNS фильтруй ТОЛЬКО конкретный столбец через VALUES, а не всю таблицу! 
-   ПРАВИЛЬНО: FILTER(VALUES('000 Календарь'[Год]), '000 Календарь'[Год] = 2024)
-   ОШИБКА: FILTER('000 Календарь', '000 Календарь'[Год] = 2024)
+   ПРАВИЛЬНО: FILTER(VALUES('000 Календарь'[Год]), '000 Календарь'[Год] = {latest_year})
+   ОШИБКА: FILTER('000 Календарь', '000 Календарь'[Год] = {latest_year})
 8. ПРАВИЛО СРАВНЕНИЯ ПО ГОДАМ (Year-over-Year): Если пользователь просит сравнить текущий год с прошлым по месяцам:
-   - ОБЯЗАТЕЛЬНО добавь фильтр текущего года: FILTER('000 Календарь', '000 Календарь'[Год] = 2024) (или другой указанный год). Без этого меры прошлого года вернут пустоту!
+   - Используй последний доступный год ({latest_year}) как "текущий".
+   - ОБЯЗАТЕЛЬНО добавь фильтр: FILTER(VALUES('000 Календарь'[Год]), '000 Календарь'[Год] = {latest_year})
    - В качестве измерения (оси X) используй '000 Календарь'[Месяц] и '000 Календарь'[Месяц Номер].
    - В конце добавь сортировку: ORDER BY '000 Календарь'[Месяц Номер] ASC.
 
@@ -179,7 +210,7 @@ class GenBIOrchestrator:
 EVALUATE TOPN(500, 
   SUMMARIZECOLUMNS(
     '002 Контрагенты'[Бизнес Регион],
-    FILTER(VALUES('000 Календарь'[Год]), '000 Календарь'[Год] = 2024),
+    FILTER(VALUES('000 Календарь'[Год]), '000 Календарь'[Год] = {latest_year}),
     "Выручка", [Реализация руб.]
   )
 )
@@ -189,18 +220,18 @@ EVALUATE
   SUMMARIZECOLUMNS(
     '000 Календарь'[Месяц Номер], 
     '000 Календарь'[Месяц],
-    FILTER('000 Календарь', '000 Календарь'[Год] = 2024),
+    FILTER(VALUES('000 Календарь'[Год]), '000 Календарь'[Год] = {latest_year}),
     "Текущий год", [Реализация руб.],
     "Прошлый год",[Реализация руб. (Прошлый год)]
   )
 ORDER BY '000 Календарь'[Месяц Номер] ASC
 
 ОТВЕТЬ СТРОГО В JSON ФОРМАТЕ:
-{{
+{{{{
   "thought": "Твои рассуждения: какие таблицы, фильтры и меры ты выбрал",
   "dax": "Сгенерированный DAX запрос",
-  "chart_type": "bar, line или table"
-}}
+  "chart_type": "bar | line | pie | treemap | scatter | area | table"
+}}}}
 """
 
     def validate_and_fix_dax(self, dax: str) -> str:
@@ -337,7 +368,7 @@ if __name__ == '__main__':
         'Продажи по видам номенклатуры',
         'Выручка в разрезе бизнес-регионов',
         'Покажи остатки на складах в штуках',
-        'Топ-10 товаров по сумме реализации за 2024 год',
+        'Топ-10 товаров по сумме реализации',
         'Выручка по месяцам только для контрагентов из Москвы',
         'Остатки номенклатуры с видом "Винт" на текущий момент',
         'Сравни продажи этого года с прошлым годом по месяцам',
@@ -346,7 +377,7 @@ if __name__ == '__main__':
         'Рентабельность по менеджерам за последний месяц',
         'Доля продаж каждого товара в общем объеме (в процентах)',
         'Средний оплаченный счет в разрезе ответственных менеджеров',
-        'Количество новых клиентов по месяцам за 2024 год',
+        'Количество новых клиентов по месяцам',
         'Список неоплаченных счетов по контрагентам',
         'Остатки на складах, которые сейчас находятся в резерве (в кг)' 
     ]

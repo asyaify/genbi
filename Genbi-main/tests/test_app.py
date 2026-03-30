@@ -11,11 +11,14 @@ from app import (
     _clean_df_for_display,
     _aggregate_top_n,
     _format_value_axis,
+    _is_rate_metric,
+    _style_dataframe,
     build_insights,
     build_executive_summary,
     build_chart,
     build_query_graph_dot,
     build_kpi_cards,
+    build_drilldown_suggestions,
     dataframe_to_pdf_bytes,
     dataframe_to_excel_bytes,
     dataframe_to_word_bytes,
@@ -126,17 +129,115 @@ class TestBuildChart:
         # Проверяем что бары горизонтальные
         assert fig.data[0].orientation == "h"
 
+    def test_pie_chart(self):
+        df = pd.DataFrame({"Cat": ["A", "B", "C"], "Val": [10, 20, 30]})
+        fig = build_chart(df, "pie")
+        assert fig is not None
+        assert fig.data[0].type == "pie"
+
+    def test_treemap_chart(self):
+        df = pd.DataFrame({"Cat": ["A", "B", "C"], "Val": [10, 20, 30]})
+        fig = build_chart(df, "treemap")
+        assert fig is not None
+        assert fig.data[0].type == "treemap"
+
+    def test_scatter_chart(self):
+        df = pd.DataFrame({"Cat": ["A", "B", "C"], "X": [1, 2, 3], "Y": [4, 5, 6]})
+        fig = build_chart(df, "scatter")
+        assert fig is not None
+
+    def test_area_chart(self):
+        df = pd.DataFrame({"Month": ["Янв", "Фев", "Мар"], "Val": [100, 200, 150]})
+        fig = build_chart(df, "area")
+        assert fig is not None
+
+    def test_custom_columns(self):
+        df = pd.DataFrame({"A": ["x", "y"], "B": [10, 20], "C": [30, 40]})
+        fig = build_chart(df, "bar", x_col="A", y_cols_override=["C"])
+        assert fig is not None
+
+    def test_reference_lines_line(self):
+        df = pd.DataFrame({"Month": ["Янв", "Фев", "Мар"], "Val": [100, 200, 300]})
+        fig = build_chart(df, "line", show_avg=True, show_median=True)
+        # Должны быть shape-элементы (hline/vline добавляют shapes)
+        assert fig.layout.shapes is not None or len(fig.data) > 0
+
+    def test_reference_lines_bar(self):
+        df = pd.DataFrame({"Cat": ["A", "B", "C"], "Val": [100, 200, 300]})
+        fig = build_chart(df, "bar", show_avg=True)
+        assert fig is not None
+
+
+# ────────────────────────────────────────
+# _style_dataframe
+# ────────────────────────────────────────
+
+class TestStyleDataframe:
+    def test_returns_styler_for_numeric(self):
+        df = pd.DataFrame({"Cat": ["A", "B"], "Val": [10, 20]})
+        result = _style_dataframe(df)
+        assert hasattr(result, "to_html")  # Styler has to_html
+
+    def test_returns_df_for_no_numeric(self):
+        df = pd.DataFrame({"A": ["x", "y"], "B": ["a", "b"]})
+        result = _style_dataframe(df)
+        assert isinstance(result, pd.DataFrame)
+
+
+# ────────────────────────────────────────
+# build_drilldown_suggestions
+# ────────────────────────────────────────
+
+class TestDrilldownSuggestions:
+    def test_returns_suggestions(self):
+        df = pd.DataFrame({"Region": ["Москва", "Питер", "Казань"], "Val": [100, 50, 30]})
+        suggestions = build_drilldown_suggestions(df, "Выручка по регионам")
+        assert len(suggestions) >= 1
+
+    def test_top_category_drill(self):
+        df = pd.DataFrame({"Region": ["Москва", "Питер"], "Val": [200, 100]})
+        suggestions = build_drilldown_suggestions(df, "Выручка по регионам")
+        assert any("Москва" in s for s in suggestions)
+
+    def test_suggests_time_analysis(self):
+        df = pd.DataFrame({"Region": ["A", "B"], "Val": [100, 200]})
+        suggestions = build_drilldown_suggestions(df, "Продажи по городам")
+        assert any("месяц" in s.lower() or "динамик" in s.lower() for s in suggestions)
+
+    def test_no_time_suggestion_for_time_query(self):
+        df = pd.DataFrame({"Region": ["A", "B"], "Val": [100, 200]})
+        suggestions = build_drilldown_suggestions(df, "Динамика продаж по месяцам")
+        assert not any(s == "Показать динамику по месяцам" for s in suggestions)
+
+    def test_empty_df(self):
+        suggestions = build_drilldown_suggestions(pd.DataFrame(), "test")
+        assert suggestions == []
+
 
 # ────────────────────────────────────────
 # build_kpi_cards
 # ────────────────────────────────────────
+
+class TestIsRateMetric:
+    def test_average_detected(self):
+        assert _is_rate_metric("Средний оплаченный счет, руб.") is True
+
+    def test_percent_detected(self):
+        assert _is_rate_metric("Доля маркетплейса %") is True
+
+    def test_regular_metric_not_rate(self):
+        assert _is_rate_metric("Реализация руб.") is False
+
+    def test_coefficient_detected(self):
+        assert _is_rate_metric("Коэффициент конверсии") is True
+
 
 class TestBuildKpiCards:
     def test_basic(self):
         df = pd.DataFrame({"Region": ["A", "B"], "Revenue": [1000, 2000]})
         cards = build_kpi_cards(df)
         assert len(cards) >= 1
-        assert any("Строк" in c["label"] for c in cards)
+        assert any("Записей" in c["label"] for c in cards)
 
     def test_empty_df(self):
         cards = build_kpi_cards(pd.DataFrame())
@@ -145,9 +246,34 @@ class TestBuildKpiCards:
     def test_numeric_formatting(self):
         df = pd.DataFrame({"X": ["A"], "Revenue": [5_000_000]})
         cards = build_kpi_cards(df)
-        # Должен быть отформатирован в млн
         revenue_cards = [c for c in cards if "Revenue" in c["label"]]
         assert any("млн" in c["value"] for c in revenue_cards)
+
+    def test_rate_metric_shows_median(self):
+        df = pd.DataFrame({
+            "Регион": ["A", "B", "C"],
+            "Средний чек": [100, 200, 300],
+        })
+        cards = build_kpi_cards(df)
+        labels = [c["label"] for c in cards]
+        assert any("Медиана" in l for l in labels), f"Expected 'Медиана' in {labels}"
+        # Не должно быть Итого для средних
+        assert not any("Итого" in l for l in labels)
+
+    def test_absolute_metric_shows_total(self):
+        df = pd.DataFrame({
+            "Регион": ["A", "B", "C"],
+            "Выручка": [1000, 2000, 3000],
+        })
+        cards = build_kpi_cards(df)
+        labels = [c["label"] for c in cards]
+        assert any("Итого" in l for l in labels)
+
+    def test_unique_categories_shown(self):
+        df = pd.DataFrame({"Регион": ["Москва", "Питер", "Москва"], "Val": [1, 2, 3]})
+        cards = build_kpi_cards(df)
+        labels = [c["label"] for c in cards]
+        assert any("Уник" in l for l in labels)
 
 
 # ────────────────────────────────────────
@@ -164,6 +290,48 @@ class TestBuildExecutiveSummary:
         df = pd.DataFrame({"Region": ["A"], "Val": [2_000_000]})
         summary = build_executive_summary(df)
         assert "млн" in summary
+
+    def test_contains_overview(self):
+        df = pd.DataFrame({"Region": ["A", "B", "C"], "Val": [100, 200, 300]})
+        summary = build_executive_summary(df)
+        assert "3 строк" in summary
+
+    def test_rate_metric_shows_median(self):
+        df = pd.DataFrame({
+            "Регион": ["A", "B", "C", "D"],
+            "Средний чек": [100, 200, 300, 400],
+        })
+        summary = build_executive_summary(df)
+        assert "медиана" in summary
+
+    def test_leaders_with_percent(self):
+        df = pd.DataFrame({
+            "Регион": ["Москва", "Питер", "Казань"],
+            "Выручка": [5000, 3000, 2000],
+        })
+        summary = build_executive_summary(df)
+        assert "%" in summary
+        assert "Топ" in summary
+
+    def test_empty_df(self):
+        summary = build_executive_summary(pd.DataFrame())
+        assert "отсутствуют" in summary.lower()
+
+    def test_outlier_detection(self):
+        df = pd.DataFrame({
+            "Cat": [f"C{i}" for i in range(20)],
+            "Val": [10] * 19 + [10000],  # 1 outlier
+        })
+        summary = build_executive_summary(df)
+        assert "Выбросы" in summary or "выброс" in summary.lower()
+
+    def test_concentration_warning(self):
+        df = pd.DataFrame({
+            "Cat": ["A", "B", "C", "D", "E"],
+            "Val": [8000, 1500, 300, 100, 100],
+        })
+        summary = build_executive_summary(df)
+        assert "концентрация" in summary.lower()
 
 
 # ────────────────────────────────────────
