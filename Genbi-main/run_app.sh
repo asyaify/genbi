@@ -1,0 +1,3 @@
+#!/bin/bash
+cd /workspaces/genbi/Genbi-main
+streamlit run app.py --server.port 8501 --server.headless=true
